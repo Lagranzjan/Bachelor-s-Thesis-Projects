@@ -1,0 +1,124 @@
+
+import matplotlib.pyplot as plt
+import numpy as np
+import scipy.stats as si
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
+#1. Generating data (Black Scholes Formula for Call options)
+np.random.seed(0)
+torch.manual_seed(0)
+N = 100000
+#assumption: r = 0.05 for simplicity (model receives 4 variables: S, K, T and Sigma)
+r = 0.05
+S = np.random.uniform(50, 150, N)
+K = np.random.uniform(50, 150, N)
+T = np.random.uniform(0.1, 2.0, N)
+sigma = np.random.uniform(0.1, 0.5, N)
+
+def black_scholes_call(S, K, T, r, sigma):
+    d1 = (np.log(S/K) + (r + 0.5 * sigma ** 2) * T)/ (sigma* np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    return S * si.norm.cdf(d1) - K * np.exp(-r * T ) * si.norm.cdf(d2)
+
+C = black_scholes_call(S, K, T, r, sigma)
+
+#Preparing Matrix of features X [N, 4] and labels Y [N, 1]
+X = np.stack([S, K, T, sigma], axis = 1)
+Y = C.reshape(-1, 1) #tworzenie macierzy dwuwymiarowej
+#--- 2. TRAIN / VAL/ NORMALIZATION
+#Manual division 80% train/ 20% val
+train_size = int(0.8 * N)
+X_train_raw, X_val_raw = X[:train_size], X[train_size:]
+Y_train, Y_val =  Y[:train_size], Y[train_size:]
+#Normalization of features (crucial for quick convergence of the MLP)
+X_mean = X_train_raw.mean(axis = 0)
+X_std = X_train_raw.std(axis = 0)
+
+X_train = (X_train_raw - X_mean) / X_std
+X_val = (X_val_raw - X_mean) / X_std
+
+#Conversion to PyTorch tensors
+
+X_train_t = torch.tensor(X_train, dtype = torch.float32)
+Y_train_t = torch.tensor(Y_train, dtype = torch.float32)
+X_val_t = torch.tensor(X_val, dtype = torch.float32)
+Y_val_t = torch.tensor(Y_val, dtype = torch.float32)
+
+#Creating of DataLoaders to learn by mini-batches
+train_dataset = TensorDataset(X_train_t, Y_train_t)
+train_loader = DataLoader(train_dataset, batch_size = 256, shuffle = True)
+
+#--- MLP Architecture ---
+
+class BlackScholesMLP(nn.Module):
+    def __init__(self):
+        super(BlackScholesMLP, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(4, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1) #Output is singular value (the price of the option)
+        )
+    def forward(self, x):
+        return self.network(x)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = BlackScholesMLP().to(device)
+
+# --- 4. Loss Function & Optimizer ---
+criterion = nn.MSELoss() # Typical for regression
+optimizer = optim.Adam(model.parameters(), lr = 0.001)
+
+# ---5. Training Loop ---
+epochs = 20
+train_losses = []
+val_losses = []
+
+X_val_t = X_val_t.to(device)
+Y_val_t = Y_val_t.to(device)
+
+for epoch in range(epochs):
+    model.train()
+    running_loss = 0.0
+
+    for batch_X, batch_Y in train_loader:
+        batch_X, batch_Y = batch_X.to(device), batch_Y.to(device)
+
+        #learning setp
+        optimizer.zero_grad()
+        predictions = model(batch_X)
+        loss = criterion(predictions, batch_Y)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item() * batch_X.size(0)
+    epoch_train_loss = running_loss / len(train_loader.dataset)
+
+    #Evaluation on validation set
+    model.eval()
+    with torch.no_grad():
+        val_predictions = model(X_val_t)
+        epoch_val_loss = criterion(val_predictions, Y_val_t).item()
+    train_losses.append(epoch_train_loss)
+    val_losses.append(epoch_val_loss)
+
+    print(
+        f"Epoch {epoch+1:02d}/{epochs} | Train MSE: {epoch_train_loss:.4f} | Validation MSE: {epoch_val_loss:.4f}"
+    )
+# --- 6. Plot
+plt.figure(figsize=(10,5))
+plt.plot(train_losses, label = "Train Loss (MSE)", color = "blue")
+plt.plot(val_losses, label = "Validation Loss (MSE)", color = "red")
+plt.xlabel("Epochs")
+plt.ylabel("Mean squared error (MSE)")
+plt.title("Black-scholes Learning Curve")
+plt.legend()
+plt.grid(True)
+plt.yscale("log") #logarithmic scale because loss quickly falls to near-zero values
+plt.show()
